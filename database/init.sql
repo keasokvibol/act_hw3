@@ -1,7 +1,7 @@
 
-CREATE DATABASE IF NOT EXISTS iqa_hw2_db;
+CREATE DATABASE IF NOT EXISTS iqa_hw3_db;
 
-USE iqa_hw2_db;
+USE iqa_hw3_db;
 
 CREATE TABLE IF NOT EXISTS departments (
     id INT AUTO_INCREMENT PRIMARY KEY,

@@ -1,0 +1,60 @@
+
+services:
+  web:
+    image: 148676267942.dkr.ecr.us-east-1.amazonaws.com/act_hw3_iqa_system:v1.0.0
+    ports:
+      - "9003:80"
+    environment:
+      DB_HOST: db
+      DB_NAME: iqa_hw3_db
+      DB_USER: root
+      DB_PASSWORD_FILE: /run/secrets/iqa_hw3_db_root_password
+    secrets:
+      - iqa_hw3_db_root_password
+    networks:
+      - iqa_hw3_network
+    deploy:
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+      restart_policy:
+        condition: on-failure
+
+  db:
+    image: mariadb:11.4
+    environment:
+      MARIADB_DATABASE: iqa_hw3_db
+      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/iqa_hw3_db_root_password
+    secrets:
+      - iqa_hw3_db_root_password
+    configs:
+      - source: iqa_hw3_init
+        target: /docker-entrypoint-initdb.d/init.sql
+    volumes:
+      - iqa_hw3_db_data:/var/lib/mysql
+    networks:
+      - iqa_hw3_network
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+
+configs:
+  iqa_hw3_init:
+    file: ./database/init.sql
+
+secrets:
+  iqa_hw3_db_root_password:
+    external: true
+
+networks:
+  iqa_hw3_network:
+    driver: overlay
+
+volumes:
+  iqa_hw3_db_data:
