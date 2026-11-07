@@ -1,7 +1,7 @@
 <?php
 
 $host = getenv('DB_HOST') ?: 'db';
-$dbname = getenv('DB_NAME') ?: 'iqa_hw2_db';
+$dbname = getenv('DB_NAME') ?: 'iqa_hw3_db';
 $username = getenv('DB_USER') ?: 'root';
 
 $passwordFile = getenv('DB_PASSWORD_FILE') ?: '';

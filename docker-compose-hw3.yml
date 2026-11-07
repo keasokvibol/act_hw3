@@ -1,0 +1,35 @@
+services:
+  web:
+    build: .
+    container_name: iqa-hw3-web-local
+    ports:
+      - "9003:80"
+    environment:
+      DB_HOST: db
+      DB_NAME: iqa_hw3_db
+      DB_USER: root
+      DB_PASSWORD: ${HW3_DB_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: mariadb:11.4
+    container_name: iqa-hw3-db-local
+    environment:
+      MARIADB_ROOT_PASSWORD: ${HW3_DB_PASSWORD}
+      MARIADB_DATABASE: iqa_hw3_db
+    volumes:
+      - iqa_hw3_local_db_data:/var/lib/mysql
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  iqa_hw3_local_db_data:

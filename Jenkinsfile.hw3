@@ -1,0 +1,212 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+    parameters {
+        choice(
+            name: 'ACTION',
+            choices: ['build', 'push', 'deploy', 'rollback'],
+            description: 'Select the release management action'
+        )
+        string(
+            name: 'VERSION',
+            defaultValue: 'v1.0.0',
+            description: 'Git release tag, e.g. v1.0.0'
+        )
+    }
+
+    environment {
+        AWS_REGION = 'us-east-1'
+        ECR_REGISTRY = '148676267942.dkr.ecr.us-east-1.amazonaws.com'
+        ECR_REPOSITORY = 'act_hw3_iqa_system'
+        SWARM_MANAGER = '172.31.19.179'
+        SWARM_USER = 'ubuntu'
+        STACK_NAME = 'iqa-hw3'
+        DB_SECRET_NAME = 'iqa_hw3_db_root_password'
+        DB_CREDENTIAL_ID = 'iqa-hw3-db-root-password'
+        SSH_KEY = '/var/lib/jenkins/.ssh/id_ed25519'
+    }
+
+    stages {
+
+        stage('Validate Parameters') {
+            steps {
+                script {
+                    if (!(params.VERSION ==~ /^v[0-9]+\.[0-9]+\.[0-9]+$/)) {
+                        error("Invalid version: ${params.VERSION}. Use vMAJOR.MINOR.PATCH.")
+                    }
+                }
+
+                echo "Selected action: ${params.ACTION}"
+                echo "Release version: ${params.VERSION}"
+            }
+        }
+
+        stage('Checkout Release Tag') {
+            when {
+                expression { params.ACTION == 'build' }
+            }
+            steps {
+                checkout scm
+
+                sh '''
+                    set -e
+
+                    git fetch --force --tags origin
+
+                    git rev-parse "refs/tags/${VERSION}" >/dev/null
+
+                    git checkout --detach "refs/tags/${VERSION}"
+
+                    echo "Building release: ${VERSION}"
+                    git log -1 --oneline
+                '''
+            }
+        }
+
+        stage('Build Docker Image') {
+            when {
+                expression { params.ACTION == 'build' }
+            }
+            steps {
+                sh '''
+                    set -e
+
+                    docker build \
+                      --label "org.opencontainers.image.version=${VERSION}" \
+                      -t "${ECR_REGISTRY}/${ECR_REPOSITORY}:${VERSION}" \
+                      .
+                '''
+
+                echo "Docker image built: ${params.VERSION}"
+            }
+        }
+
+        stage('Push Image to Amazon ECR') {
+            when {
+                expression { params.ACTION == 'push' }
+            }
+            steps {
+                sh '''
+                    set -e
+
+                    IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${VERSION}"
+
+                    docker image inspect "$IMAGE" >/dev/null
+
+                    if aws ecr describe-images \
+                        --repository-name "$ECR_REPOSITORY" \
+                        --image-ids imageTag="$VERSION" \
+                        --region "$AWS_REGION" >/dev/null 2>&1; then
+                        echo "ERROR: ECR image tag already exists: ${VERSION}"
+                        exit 1
+                    fi
+
+                    aws ecr get-login-password \
+                      --region "$AWS_REGION" | \
+                    docker login \
+                      --username AWS \
+                      --password-stdin "$ECR_REGISTRY"
+
+                    docker push "$IMAGE"
+
+                    echo "Successfully pushed: $IMAGE"
+                '''
+            }
+        }
+
+        stage('Deploy or Rollback') {
+            when {
+                anyOf {
+                    expression { params.ACTION == 'deploy' }
+                    expression { params.ACTION == 'rollback' }
+                }
+            }
+            steps {
+                script {
+                    echo "${params.ACTION.toUpperCase()} release ${params.VERSION}"
+                }
+
+                withCredentials([
+                    string(
+                        credentialsId: 'iqa-hw3-db-root-password',
+                        variable: 'HW3_DB_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set -e
+
+                        IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${VERSION}"
+                        DOCKER_HOST="ssh://${SWARM_USER}@${SWARM_MANAGER}"
+
+                        echo "Checking existing ECR image..."
+
+                        aws ecr describe-images \
+                          --repository-name "$ECR_REPOSITORY" \
+                          --image-ids imageTag="$VERSION" \
+                          --region "$AWS_REGION" >/dev/null
+
+                        echo "Authenticating with Amazon ECR..."
+
+                        aws ecr get-login-password \
+                          --region "$AWS_REGION" | \
+                        docker login \
+                          --username AWS \
+                          --password-stdin "$ECR_REGISTRY"
+
+                        echo "Checking HW3 database secret..."
+
+                        if ! DOCKER_HOST="$DOCKER_HOST" \
+                            docker secret inspect "$DB_SECRET_NAME" >/dev/null 2>&1; then
+
+                            printf '%s' "$HW3_DB_PASSWORD" | \
+                              DOCKER_HOST="$DOCKER_HOST" \
+                              docker secret create "$DB_SECRET_NAME" -
+
+                            echo "HW3 database secret created."
+                        else
+                            echo "HW3 database secret already exists."
+                        fi
+
+                        echo "Preparing versioned Swarm configuration..."
+
+                        sed "s#${ECR_REGISTRY}/${ECR_REPOSITORY}:v1.0.0#${IMAGE}#" \
+                          docker-stack-hw3.yml \
+                          > docker-stack-hw3-rendered.yml
+
+                        grep -F "$IMAGE" docker-stack-hw3-rendered.yml
+
+                        echo "Deploying HW3 stack..."
+
+                        DOCKER_HOST="$DOCKER_HOST" \
+                          docker stack deploy \
+                          --with-registry-auth \
+                          -c docker-stack-hw3-rendered.yml \
+                          "$STACK_NAME"
+
+                        echo "Deployment command completed."
+                        echo "Application image: $IMAGE"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "HW3 ${params.ACTION} completed successfully for ${params.VERSION}."
+        }
+
+        failure {
+            echo "HW3 ${params.ACTION} failed for ${params.VERSION}. Please inspect the console output."
+        }
+
+        always {
+            echo "HW3 Release Management Pipeline finished."
+        }
+    }
+}

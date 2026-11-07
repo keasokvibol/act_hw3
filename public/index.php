@@ -27,6 +27,7 @@
 
     <footer>
         <p>&copy; VIBOL 2026 - IQA Office Management System</p>
+        <p class="version">Application Version: v1.0.0</p>
     </footer>
 </body>
 </html>

@@ -1,4 +1,3 @@
-
 services:
   web:
     image: 148676267942.dkr.ecr.us-east-1.amazonaws.com/act_hw3_iqa_system:v1.0.0
