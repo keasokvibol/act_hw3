@@ -4,6 +4,10 @@ pipeline {
     options {
         timestamps()
         disableConcurrentBuilds()
+        buildDiscarder(logRotator(
+            numToKeepStr: '20',
+            artifactNumToKeepStr: '10'
+        ))
     }
 
     parameters {
@@ -12,99 +16,170 @@ pipeline {
             choices: ['build', 'push', 'deploy', 'rollback'],
             description: 'Select the release management action'
         )
+
         string(
             name: 'VERSION',
             defaultValue: 'v1.0.0',
-            description: 'Git release tag, e.g. v1.0.0'
+            description: 'Semantic version, e.g. v1.0.0'
         )
     }
 
     environment {
         AWS_REGION = 'us-east-1'
+
         ECR_REGISTRY = '148676267942.dkr.ecr.us-east-1.amazonaws.com'
         ECR_REPOSITORY = 'act_hw3_iqa_system'
+
         SWARM_MANAGER = '172.31.19.179'
         SWARM_USER = 'ubuntu'
+
         STACK_NAME = 'iqa-hw3'
         DB_SECRET_NAME = 'iqa_hw3_db_root_password'
-        DB_CREDENTIAL_ID = 'iqa-hw3-db-root-password'
+
         SSH_KEY = '/var/lib/jenkins/.ssh/id_ed25519'
     }
 
     stages {
 
+        // --------------------------------------------------
+        // 1. VALIDATE RELEASE PARAMETERS
+        // --------------------------------------------------
+
         stage('Validate Parameters') {
             steps {
                 script {
-                    if (!(params.VERSION ==~ /^v[0-9]+\.[0-9]+\.[0-9]+$/)) {
-                        error("Invalid version: ${params.VERSION}. Use vMAJOR.MINOR.PATCH.")
-                    }
-                }
+                    def tagVersion = (env.TAG_NAME ?: '').trim()
+                    def requestedVersion = (params.VERSION ?: '').trim()
 
-                echo "Selected action: ${params.ACTION}"
-                echo "Release version: ${params.VERSION}"
+                    env.RELEASE_VERSION = tagVersion ?: requestedVersion
+
+                    // Automatically execute the complete release
+                    // process when Jenkins discovers a Git tag.
+                    env.RELEASE_ACTION = tagVersion
+                        ? 'release'
+                        : (params.ACTION ?: 'build')
+
+                    if (!(env.RELEASE_VERSION ==~ /^v[0-9]+\.[0-9]+\.[0-9]+$/)) {
+                        error(
+                            "Invalid version: ${env.RELEASE_VERSION}. " +
+                            "Use Semantic Versioning: vMAJOR.MINOR.PATCH."
+                        )
+                    }
+
+                    if (!(env.RELEASE_ACTION in
+                        ['build', 'push', 'deploy', 'rollback', 'release'])) {
+                        error("Invalid action: ${env.RELEASE_ACTION}")
+                    }
+
+                    echo "Release version: ${env.RELEASE_VERSION}"
+                    echo "Release action: ${env.RELEASE_ACTION}"
+                    echo "Git tag: ${tagVersion ?: 'Manual execution'}"
+                }
             }
         }
 
+        // --------------------------------------------------
+        // 2. CHECKOUT RELEASE TAG
+        // --------------------------------------------------
+
         stage('Checkout Release Tag') {
             when {
-                expression { params.ACTION == 'build' }
+                expression {
+                    env.RELEASE_ACTION == 'build' ||
+                    env.RELEASE_ACTION == 'release'
+                }
             }
-            steps {
-                checkout scm
 
+            steps {
                 sh '''
-                    set -e
+                    set -eu
+
+                    echo "Fetching Git release tags..."
 
                     git fetch --force --tags origin
 
-                    git rev-parse "refs/tags/${VERSION}" >/dev/null
+                    git rev-parse \
+                      "refs/tags/${RELEASE_VERSION}^{commit}" >/dev/null
 
-                    git checkout --detach "refs/tags/${VERSION}"
+                    echo "Checking out ${RELEASE_VERSION}..."
 
-                    echo "Building release: ${VERSION}"
+                    git checkout --detach "refs/tags/${RELEASE_VERSION}"
+
+                    echo "Release source:"
                     git log -1 --oneline
                 '''
             }
         }
 
+        // --------------------------------------------------
+        // 3. BUILD DOCKER IMAGE
+        // --------------------------------------------------
+
         stage('Build Docker Image') {
             when {
-                expression { params.ACTION == 'build' }
+                expression {
+                    env.RELEASE_ACTION == 'build' ||
+                    env.RELEASE_ACTION == 'release'
+                }
             }
+
             steps {
                 sh '''
-                    set -e
+                    set -eu
+
+                    IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${RELEASE_VERSION}"
+
+                    echo "Building Docker image: ${IMAGE}"
 
                     docker build \
-                      --label "org.opencontainers.image.version=${VERSION}" \
-                      -t "${ECR_REGISTRY}/${ECR_REPOSITORY}:${VERSION}" \
+                      --label "org.opencontainers.image.version=${RELEASE_VERSION}" \
+                      --label "org.opencontainers.image.source=https://github.com/keasokvibol/act_hw3" \
+                      -t "$IMAGE" \
                       .
-                '''
 
-                echo "Docker image built: ${params.VERSION}"
+                    echo "Docker image built successfully."
+
+                    docker image inspect "$IMAGE" \
+                      --format 'Image ID: {{.Id}}'
+                '''
             }
         }
 
+        // --------------------------------------------------
+        // 4. PUSH IMAGE TO AMAZON ECR
+        // --------------------------------------------------
+
         stage('Push Image to Amazon ECR') {
             when {
-                expression { params.ACTION == 'push' }
+                expression {
+                    env.RELEASE_ACTION == 'push' ||
+                    env.RELEASE_ACTION == 'release'
+                }
             }
+
             steps {
                 sh '''
-                    set -e
+                    set -eu
 
-                    IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${VERSION}"
+                    IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${RELEASE_VERSION}"
+
+                    echo "Checking local Docker image..."
 
                     docker image inspect "$IMAGE" >/dev/null
 
+                    echo "Checking whether the release tag already exists in ECR..."
+
                     if aws ecr describe-images \
                         --repository-name "$ECR_REPOSITORY" \
-                        --image-ids imageTag="$VERSION" \
+                        --image-ids imageTag="$RELEASE_VERSION" \
                         --region "$AWS_REGION" >/dev/null 2>&1; then
-                        echo "ERROR: ECR image tag already exists: ${VERSION}"
+
+                        echo "ERROR: Image tag already exists in ECR."
+                        echo "Immutable release tags cannot be overwritten."
                         exit 1
                     fi
+
+                    echo "Authenticating with Amazon ECR..."
 
                     aws ecr get-login-password \
                       --region "$AWS_REGION" | \
@@ -112,45 +187,60 @@ pipeline {
                       --username AWS \
                       --password-stdin "$ECR_REGISTRY"
 
+                    echo "Pushing image: $IMAGE"
+
                     docker push "$IMAGE"
 
-                    echo "Successfully pushed: $IMAGE"
+                    echo "Image successfully pushed to ECR."
                 '''
             }
         }
 
-        stage('Deploy or Rollback') {
+        // --------------------------------------------------
+        // 5. DEPLOY OR ROLLBACK
+        // --------------------------------------------------
+
+        stage('Deploy or Rollback to Docker Swarm') {
             when {
-                anyOf {
-                    expression { params.ACTION == 'deploy' }
-                    expression { params.ACTION == 'rollback' }
+                expression {
+                    env.RELEASE_ACTION in
+                    ['deploy', 'rollback', 'release']
                 }
             }
-            steps {
-                script {
-                    echo "${params.ACTION.toUpperCase()} release ${params.VERSION}"
-                }
 
+            steps {
                 withCredentials([
                     string(
                         credentialsId: 'iqa-hw3-db-root-password',
                         variable: 'HW3_DB_PASSWORD'
                     )
                 ]) {
+
                     sh '''
-                        set -e
+                        set +x
+                        set -eu
 
-                        IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${VERSION}"
-                        DOCKER_HOST="ssh://${SWARM_USER}@${SWARM_MANAGER}"
+                        IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${RELEASE_VERSION}"
 
-                        echo "Checking existing ECR image..."
+                        echo "----------------------------------------"
+                        echo "HW3 ${RELEASE_ACTION}"
+                        echo "Version: ${RELEASE_VERSION}"
+                        echo "Image: ${IMAGE}"
+                        echo "----------------------------------------"
+
+                        # Verify that the selected image already exists.
+                        # Rollback never builds or pushes an image.
+
+                        echo "Verifying image in Amazon ECR..."
 
                         aws ecr describe-images \
                           --repository-name "$ECR_REPOSITORY" \
-                          --image-ids imageTag="$VERSION" \
+                          --image-ids imageTag="$RELEASE_VERSION" \
                           --region "$AWS_REGION" >/dev/null
 
-                        echo "Authenticating with Amazon ECR..."
+                        echo "Existing ECR image verified."
+
+                        # Authenticate with Amazon ECR.
 
                         aws ecr get-login-password \
                           --region "$AWS_REGION" | \
@@ -158,54 +248,105 @@ pipeline {
                           --username AWS \
                           --password-stdin "$ECR_REGISTRY"
 
+                        # Connect Docker to the Swarm Manager.
+
+                        export DOCKER_HOST="ssh://${SWARM_USER}@${SWARM_MANAGER}"
+
+                        echo "Checking remote Docker Swarm..."
+
+                        docker info --format '{{.Swarm.LocalNodeState}}' |
+                          grep -qx active
+
+                        echo "Swarm Manager is active."
+
+                        # Create the HW3 database secret if it does not exist.
+
                         echo "Checking HW3 database secret..."
 
-                        if ! DOCKER_HOST="$DOCKER_HOST" \
-                            docker secret inspect "$DB_SECRET_NAME" >/dev/null 2>&1; then
+                        if ! docker secret inspect "$DB_SECRET_NAME" >/dev/null 2>&1; then
 
-                            printf '%s' "$HW3_DB_PASSWORD" | \
-                              DOCKER_HOST="$DOCKER_HOST" \
+                            printf '%s' "$HW3_DB_PASSWORD" |
                               docker secret create "$DB_SECRET_NAME" -
 
                             echo "HW3 database secret created."
+
                         else
+
                             echo "HW3 database secret already exists."
+
                         fi
+
+                        # Render the versioned Swarm configuration.
 
                         echo "Preparing versioned Swarm configuration..."
 
-                        sed "s#${ECR_REGISTRY}/${ECR_REPOSITORY}:v1.0.0#${IMAGE}#" \
+                        sed "s#${ECR_REGISTRY}/${ECR_REPOSITORY}:v1.0.0#${IMAGE}#g" \
                           docker-stack-hw3.yml \
                           > docker-stack-hw3-rendered.yml
 
                         grep -F "$IMAGE" docker-stack-hw3-rendered.yml
 
-                        echo "Deploying HW3 stack..."
+                        # Deploy the selected existing image.
 
-                        DOCKER_HOST="$DOCKER_HOST" \
-                          docker stack deploy \
+                        echo "Deploying HW3 stack: ${STACK_NAME}"
+
+                        docker stack deploy \
                           --with-registry-auth \
                           -c docker-stack-hw3-rendered.yml \
                           "$STACK_NAME"
 
-                        echo "Deployment command completed."
-                        echo "Application image: $IMAGE"
+                        echo "----------------------------------------"
+                        echo "HW3 deployment command completed."
+                        echo "Release: ${RELEASE_VERSION}"
+                        echo "Action: ${RELEASE_ACTION}"
+                        echo "----------------------------------------"
+
+                        echo "Checking deployed services..."
+
+                        docker stack services "$STACK_NAME"
+
+                        echo "Checking web service tasks..."
+
+                        docker service ps "${STACK_NAME}_web" \
+                          --no-trunc
                     '''
                 }
             }
         }
     }
 
+    // --------------------------------------------------
+    // 6. POST-BUILD ACTIONS
+    // --------------------------------------------------
+
     post {
+
         success {
-            echo "HW3 ${params.ACTION} completed successfully for ${params.VERSION}."
+            echo """
+            ========================================
+            HW3 PIPELINE SUCCESSFUL
+            Release: ${env.RELEASE_VERSION ?: params.VERSION}
+            Action: ${env.RELEASE_ACTION ?: params.ACTION}
+            ========================================
+            """
         }
 
         failure {
-            echo "HW3 ${params.ACTION} failed for ${params.VERSION}. Please inspect the console output."
+            echo """
+            ========================================
+            HW3 PIPELINE FAILED
+            Release: ${env.RELEASE_VERSION ?: params.VERSION}
+            Action: ${env.RELEASE_ACTION ?: params.ACTION}
+            Please inspect the Jenkins Console Output.
+            ========================================
+            """
         }
 
         always {
+            sh '''
+                rm -f docker-stack-hw3-rendered.yml || true
+            '''
+
             echo "HW3 Release Management Pipeline finished."
         }
     }
