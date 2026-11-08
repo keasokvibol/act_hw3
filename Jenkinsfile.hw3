@@ -280,9 +280,11 @@ pipeline {
 
                         echo "Preparing versioned Swarm configuration..."
 
-                        sed "s#${ECR_REGISTRY}/${ECR_REPOSITORY}:v1.0.0#${IMAGE}#g" \
-                          docker-stack-hw3.yml \
-                          > docker-stack-hw3-rendered.yml
+                        sed \
+                            -e "s#${ECR_REGISTRY}/${ECR_REPOSITORY}:v1.0.0#${IMAGE}#g" \
+                            -e "s#APP_VERSION: v1.0.0#APP_VERSION: ${RELEASE_VERSION}#g" \
+                            docker-stack-hw3.yml \
+                            > docker-stack-hw3-rendered.yml
 
                         grep -F "$IMAGE" docker-stack-hw3-rendered.yml
 

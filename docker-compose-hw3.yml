@@ -9,6 +9,7 @@ services:
       DB_NAME: iqa_hw3_db
       DB_USER: root
       DB_PASSWORD: ${HW3_DB_PASSWORD}
+      APP_VERSION: v1.1.0
     depends_on:
       db:
         condition: service_healthy
