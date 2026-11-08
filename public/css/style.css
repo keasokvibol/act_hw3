@@ -152,3 +152,40 @@ main {
         grid-template-columns: 1fr;
     }
 }
+
+/* Employee Distribution Section */
+.distribution-section {
+    margin-top: 35px;
+}
+
+.distribution-section h2 {
+    color: #163a70;
+    margin-bottom: 10px;
+}
+
+.distribution-section p {
+    margin-bottom: 20px;
+}
+
+.distribution-section table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #ffffff;
+    margin-bottom: 25px;
+}
+
+.distribution-section th,
+.distribution-section td {
+    padding: 14px 16px;
+    border: 1px solid #dbe3ef;
+    text-align: left;
+}
+
+.distribution-section th {
+    background: #e8eef7;
+    color: #163a70;
+}
+
+.distribution-section tr:hover {
+    background: #f8fafc;
+}
